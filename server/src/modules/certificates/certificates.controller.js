@@ -39,6 +39,33 @@ const logDetailedError = (label, error) => {
 };
 
 export class CertificatesController {
+  static buildCertificatePdfData(certificate) {
+    return {
+      clinicName: certificate.clinic.name,
+      clinicAddress: certificate.clinic.address,
+      clinicPhone: certificate.clinic.contactNumber,
+      clinicEmail: certificate.clinic.email,
+      clinicLogoUrl: certificate.clinic.logoUrl,
+      doctorName: `${certificate.doctor.user.firstName} ${certificate.doctor.user.lastName}`,
+      doctorLicense: certificate.doctor.licenseNumber,
+      doctorSpecialization: certificate.doctor.specialization,
+      doctorSignatureUrl: certificate.doctor.signatureUrl,
+      patientName: certificate.patient.fullName,
+      patientIdentifier: certificate.patient.identifier,
+      patientDob: certificate.patient.dob.toISOString(),
+      patientGender: certificate.patient.gender,
+      certificateNumber: certificate.certificateNumber,
+      issueDate: certificate.issueDate.toISOString(),
+      startDate: certificate.startDate.toISOString(),
+      endDate: certificate.endDate.toISOString(),
+      durationDays: certificate.durationDays,
+      diagnosis: certificate.diagnosis,
+      remarks: certificate.remarks || '',
+      verificationHash: certificate.verificationHash,
+      verifyUrl: certificate.qrCodeUrl || `${config.clientUrl}/verify/${certificate.certificateNumber}`,
+    };
+  }
+
   // List certificates with filters
   static async listCertificates(req, res) {
     try {
@@ -409,6 +436,65 @@ export class CertificatesController {
       return res.status(200).json(certificate);
     } catch (error) {
       logger.error('Get certificate details error:', error);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  }
+
+  static async downloadCertificate(req, res) {
+    let generatedPdf = null;
+
+    try {
+      const clinicId = req.user?.clinicId;
+      const isSuperAdmin = req.user?.role === 'SUPER_ADMIN';
+      const { id } = req.params;
+
+      if (!clinicId && !isSuperAdmin) {
+        return res.status(400).json({ error: 'No clinic context' });
+      }
+
+      const whereClause = {
+        OR: [
+          { id },
+          { certificateNumber: id },
+        ],
+      };
+      if (!isSuperAdmin) {
+        whereClause.clinicId = clinicId;
+      }
+
+      const certificate = await prisma.certificate.findFirst({
+        where: whereClause,
+        include: {
+          patient: true,
+          doctor: {
+            include: {
+              user: {
+                select: { firstName: true, lastName: true },
+              },
+            },
+          },
+          clinic: true,
+        },
+      });
+
+      if (!certificate || certificate.deletedAt) {
+        return res.status(404).json({ error: 'Certificate not found' });
+      }
+
+      generatedPdf = await PDFService.generateCertificatePDF(CertificatesController.buildCertificatePdfData(certificate));
+
+      res.download(generatedPdf.pdfPath, generatedPdf.filename, async (error) => {
+        await PDFService.cleanupTempPDF(generatedPdf?.pdfPath);
+        generatedPdf = null;
+
+        if (error && !res.headersSent) {
+          logger.error('Certificate download error:', error);
+          res.status(500).json({ error: 'Failed to download certificate' });
+        }
+      });
+    } catch (error) {
+      await PDFService.cleanupTempPDF(generatedPdf?.pdfPath);
+      logger.error('Download certificate error:', error);
       return res.status(500).json({ error: 'Internal Server Error' });
     }
   }

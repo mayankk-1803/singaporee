@@ -185,6 +185,30 @@ export default function Certificates() {
     }
   };
 
+  const handleDownloadCertificate = async (cert: Certificate) => {
+    try {
+      if (cert.pdfUrl) {
+        window.open(cert.pdfUrl, '_blank', 'noopener,noreferrer');
+        return;
+      }
+
+      const response = await api.get(`/certificates/${cert.id}/download`, {
+        responseType: 'blob',
+      });
+      const blob = new Blob([response.data], { type: 'application/pdf' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `Medical_Certificate_${cert.certificateNumber}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to download certificate PDF.');
+    }
+  };
+
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -271,17 +295,14 @@ export default function Certificates() {
                     </span>
                   </td>
                   <td className="px-6 py-4 text-right flex justify-end gap-2">
-                    {cert.pdfUrl && (
-                      <a 
-                        href={cert.pdfUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 text-slate-600 dark:text-slate-300 p-2 rounded-xl transition cursor-pointer"
-                        title="Download PDF"
-                      >
-                        <FileDown className="w-4 h-4" />
-                      </a>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadCertificate(cert)}
+                      className="bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 text-slate-600 dark:text-slate-300 p-2 rounded-xl transition cursor-pointer"
+                      title="Download PDF"
+                    >
+                      <FileDown className="w-4 h-4" />
+                    </button>
                     {cert.status === 'ACTIVE' && user?.role !== 'STAFF' && (
                       <button 
                         onClick={() => openRevokeModal(cert)}
