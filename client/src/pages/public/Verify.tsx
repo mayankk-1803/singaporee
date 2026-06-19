@@ -231,7 +231,7 @@ export default function Verify() {
                 <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex gap-3 text-xs text-slate-500">
                   <Info className="w-4 h-4 text-primary shrink-0 mt-0.5" />
                   <p>
-                    <strong>Medical Privacy Protection:</strong> Patient names and identifiers are partially masked in validation responses. Specific medical diagnosis details are completely omitted to ensure confidentiality.
+                    <strong>Secure Verification:</strong> Full patient details are shown only after the certificate number and matching NRIC/Passport challenge are verified. Medical diagnosis details remain omitted.
                   </p>
                 </div>
 

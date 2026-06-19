@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { Certificate, VerificationLog } from '../../models/index.js';
-import { maskName, maskIdentifier } from '../../utils/mask.js';
 import logger from '../../utils/logger.js';
 import { serialize } from '../../utils/mongo.js';
 
@@ -96,17 +95,13 @@ export class VerificationController {
         result: resultStatus,
       });
 
-      // Mask patient data to prevent leaks
-      const maskedPatientName = maskName(certificate.patient.fullName);
-      const maskedIdentifier = maskIdentifier(certificate.patient.identifier);
-
       return res.status(200).json({
         certificateNumber: certificate.certificateNumber,
         status, // ACTIVE, EXPIRED, REVOKED, CANCELLED
         clinicName: certificate.clinic.name,
         doctorName: `Dr. ${certificate.doctor.user.firstName} ${certificate.doctor.user.lastName}`,
-        patientName: maskedPatientName,
-        patientIdentifier: maskedIdentifier,
+        patientName: certificate.patient.fullName,
+        patientIdentifier: certificate.patient.identifier,
         issueDate: certificate.issueDate,
         startDate: certificate.startDate,
         endDate: certificate.endDate,
