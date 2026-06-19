@@ -1,17 +1,26 @@
 import { z } from 'zod';
-import { prisma } from '../../config/prisma.js';
+import { Certificate, Clinic, Doctor, Patient } from '../../models/index.js';
 import { AuditService } from '../../services/auditService.js';
 import { NotificationService } from '../../services/notificationService.js';
 import { PDFService } from '../../services/pdfService.js';
 import { calculateCertificateHash } from '../../utils/hash.js';
 import { config } from '../../config/index.js';
 import logger from '../../utils/logger.js';
-import { certificate_type } from '@prisma/client';
+import { idOrNumberFilter, isObjectId, regexContains, serialize } from '../../utils/mongo.js';
+
+const certificateTypes = [
+  'MEDICAL_CERTIFICATE',
+  'FITNESS_CERTIFICATE',
+  'RETURN_TO_WORK_CERTIFICATE',
+  'MEDICAL_REPORT',
+  'VACCINATION_CERTIFICATE',
+  'TRAVEL_HEALTH_CERTIFICATE',
+];
 
 const createCertificateSchema = z.object({
   patientId: z.string(),
   doctorId: z.string().optional(), // optional if logged in user is a DOCTOR
-  type: z.nativeEnum(certificate_type).default(certificate_type.MEDICAL_CERTIFICATE),
+  type: z.enum(certificateTypes).default('MEDICAL_CERTIFICATE'),
   startDate: z.string(),
   endDate: z.string(),
   diagnosis: z.string().min(3),
@@ -87,29 +96,24 @@ export class CertificatesController {
       if (status) filters.status = status;
       
       if (q) {
-        filters.OR = [
-          { certificateNumber: { contains: String(q) } },
-          { patient: { fullName: { contains: String(q) } } },
-          { patient: { identifier: { contains: String(q) } } },
+        const regex = regexContains(q);
+        const patients = await Patient.find({
+          $or: [{ fullName: regex }, { identifier: regex }],
+          ...(isSuperAdmin ? {} : { clinicId }),
+        }).select('_id');
+        filters.$or = [
+          { certificateNumber: regex },
+          { patientId: { $in: patients.map((patient) => patient._id) } },
         ];
       }
 
-      const certificates = await prisma.certificate.findMany({
-        where: filters,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          patient: {
-            select: { fullName: true, identifier: true, email: true },
-          },
-          doctor: {
-            include: {
-              user: {
-                select: { firstName: true, lastName: true },
-              },
-            },
-          },
-        },
-      });
+      const certificates = serialize(await Certificate.find(filters)
+        .sort({ createdAt: -1 })
+        .populate({ path: 'patient', select: 'fullName identifier email' })
+        .populate({
+          path: 'doctor',
+          populate: { path: 'user', select: 'firstName lastName' },
+        }));
 
       return res.status(200).json(certificates);
     } catch (error) {
@@ -134,9 +138,7 @@ export class CertificatesController {
       // Determine Doctor context
       let selectedDoctorId = '';
       if (req.user?.role === 'DOCTOR') {
-        const doctor = await prisma.doctor.findUnique({
-          where: { userId: req.user.userId },
-        });
+        const doctor = serialize(await Doctor.findOne({ userId: req.user.userId }));
         if (!doctor || doctor.isSuspended) {
           return res.status(403).json({ error: 'Doctor account is not active or suspended' });
         }
@@ -148,25 +150,18 @@ export class CertificatesController {
       }
 
       logger.info('[Certificate Pipeline] Step 2: Loading Patient');
-      const patient = await prisma.patient.findFirst({
-        where: { id: data.patientId, clinicId },
-      });
+      const patient = serialize(await Patient.findOne({ _id: data.patientId, clinicId }));
       if (!patient) {
         return res.status(404).json({ error: 'Patient not found' });
       }
 
       logger.info('[Certificate Pipeline] Step 3: Loading Doctor');
-      const doctor = await prisma.doctor.findFirst({
-        where: { id: selectedDoctorId, clinicId },
-        include: { user: true },
-      });
+      const doctor = serialize(await Doctor.findOne({ _id: selectedDoctorId, clinicId }).populate('user'));
       if (!doctor || doctor.isSuspended) {
         return res.status(404).json({ error: 'Doctor not found or suspended' });
       }
 
-      const clinic = await prisma.clinic.findUnique({
-        where: { id: clinicId },
-      });
+      const clinic = serialize(await Clinic.findById(clinicId));
       if (!clinic) {
         return res.status(404).json({ error: 'Clinic not found' });
       }
@@ -184,15 +179,9 @@ export class CertificatesController {
 
       logger.info('[Certificate Pipeline] Step 4: Generating Certificate Number');
       const year = new Date().getFullYear();
-      const lastCertificate = await prisma.certificate.findFirst({
-        where: {
-          certificateNumber: {
-            startsWith: `MC-${year}-`,
-          },
-        },
-        orderBy: { certificateNumber: 'desc' },
-        select: { certificateNumber: true },
-      });
+      const lastCertificate = serialize(await Certificate.findOne({
+        certificateNumber: new RegExp(`^MC-${year}-`),
+      }).sort({ certificateNumber: -1 }).select('certificateNumber'));
 
       const lastSequence = lastCertificate?.certificateNumber
         ? Number.parseInt(lastCertificate.certificateNumber.split('-').at(-1), 10)
@@ -262,13 +251,7 @@ export class CertificatesController {
         pdfAttachment: generatedPdf?.filename,
       })}`);
 
-      const certificate = await prisma.$transaction(async (tx) => {
-        const newCert = await tx.certificate.create({
-          data: certificatePayload,
-        });
-
-        return newCert;
-      });
+      const certificate = serialize(await Certificate.create(certificatePayload));
 
       // Audit Log
       await AuditService.log({
@@ -332,18 +315,12 @@ export class CertificatesController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const certificate = await prisma.certificate.findFirst({
-        where: {
-          OR: [
-            { id, clinicId },
-            { certificateNumber: id, clinicId },
-          ],
-        },
-        include: {
-          patient: true,
-          clinic: true,
-        },
-      });
+      const certificate = serialize(await Certificate.findOne({
+        clinicId,
+        ...idOrNumberFilter(id),
+      })
+        .populate('patient')
+        .populate('clinic'));
 
       if (!certificate) {
         return res.status(404).json({ error: 'Certificate not found' });
@@ -353,10 +330,11 @@ export class CertificatesController {
         return res.status(400).json({ error: 'Certificate is already revoked' });
       }
 
-      const updated = await prisma.certificate.update({
-        where: { id: certificate.id },
-        data: { status: 'REVOKED' },
-      });
+      const updated = serialize(await Certificate.findByIdAndUpdate(
+        certificate.id,
+        { status: 'REVOKED' },
+        { new: true }
+      ));
 
       await AuditService.log({
         userId: req.user?.userId,
@@ -413,21 +391,21 @@ export class CertificatesController {
         whereClause.clinicId = clinicId;
       }
 
-      const certificate = await prisma.certificate.findFirst({
-        where: whereClause,
-        include: {
-          patient: true,
-          doctor: {
-            include: {
-              user: {
-                select: { firstName: true, lastName: true },
-              },
-            },
-          },
-          clinic: true,
-          certificatefile: true,
-        },
-      });
+      if (!isObjectId(id)) {
+        return res.status(404).json({ error: 'Certificate not found' });
+      }
+
+      const certificate = serialize(await Certificate.findOne({
+        _id: id,
+        ...(whereClause.clinicId && { clinicId: whereClause.clinicId }),
+      })
+        .populate('patient')
+        .populate({
+          path: 'doctor',
+          populate: { path: 'user', select: 'firstName lastName' },
+        })
+        .populate('clinic')
+        .populate('certificatefile'));
 
       if (!certificate) {
         return res.status(404).json({ error: 'Certificate not found' });
@@ -452,30 +430,18 @@ export class CertificatesController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const whereClause = {
-        OR: [
-          { id },
-          { certificateNumber: id },
-        ],
-      };
+      const whereClause = idOrNumberFilter(id);
       if (!isSuperAdmin) {
         whereClause.clinicId = clinicId;
       }
 
-      const certificate = await prisma.certificate.findFirst({
-        where: whereClause,
-        include: {
-          patient: true,
-          doctor: {
-            include: {
-              user: {
-                select: { firstName: true, lastName: true },
-              },
-            },
-          },
-          clinic: true,
-        },
-      });
+      const certificate = serialize(await Certificate.findOne(whereClause)
+        .populate('patient')
+        .populate({
+          path: 'doctor',
+          populate: { path: 'user', select: 'firstName lastName' },
+        })
+        .populate('clinic'));
 
       if (!certificate || certificate.deletedAt) {
         return res.status(404).json({ error: 'Certificate not found' });

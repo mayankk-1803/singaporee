@@ -1,9 +1,0 @@
-ALTER TABLE `Clinic` ADD COLUMN `logoPublicId` VARCHAR(191) NULL;
-
-ALTER TABLE `Doctor` ADD COLUMN `signaturePublicId` VARCHAR(191) NULL;
-
-ALTER TABLE `Certificate` ADD COLUMN `qrUrl` TEXT NULL,
-    ADD COLUMN `qrPublicId` VARCHAR(191) NULL,
-    ADD COLUMN `pdfPublicId` VARCHAR(191) NULL;
-
-ALTER TABLE `CertificateFile` ADD COLUMN `filePublicId` VARCHAR(191) NULL;

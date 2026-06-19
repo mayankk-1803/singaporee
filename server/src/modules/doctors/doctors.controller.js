@@ -1,9 +1,10 @@
 import bcrypt from 'bcrypt';
 import { z } from 'zod';
-import prisma from '../../config/prisma.js';
+import { Certificate, Doctor, User } from '../../models/index.js';
 import { AuditService } from '../../services/auditService.js';
 import { cleanupUploadedFile, deleteAsset, uploadDoctorSignature } from '../../services/cloudinaryService.js';
 import logger from '../../utils/logger.js';
+import { serialize } from '../../utils/mongo.js';
 
 const createDoctorSchema = z.object({
   email: z.string().email(),
@@ -33,40 +34,15 @@ export class DoctorsController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const queryOptions = {
-        include: {
-          user: {
-            select: {
-              id: true,
-              email: true,
-              firstName: true,
-              lastName: true,
-              phone: true,
-              isSuspended: true,
-            },
-          },
-          clinic: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-          _count: {
-            select: { certificate: true },
-          },
-        },
-      };
+      const query = isSuperAdmin ? {} : { clinicId };
+      const doctors = serialize(await Doctor.find(query)
+        .populate({ path: 'user', select: 'email firstName lastName phone isSuspended' })
+        .populate({ path: 'clinic', select: 'name' }));
 
-      if (!isSuperAdmin) {
-        queryOptions.where = { clinicId };
-      }
-
-      const doctors = await prisma.doctor.findMany(queryOptions);
-
-      const mappedDoctors = doctors.map((doc) => ({
+      const mappedDoctors = await Promise.all(doctors.map(async (doc) => ({
         ...doc,
-        _count: doc._count ? { certificates: doc._count.certificate } : { certificates: 0 },
-      }));
+        _count: { certificates: await Certificate.countDocuments({ doctorId: doc.id }) },
+      })));
 
       return res.status(200).json(mappedDoctors);
     } catch (error) {
@@ -84,16 +60,12 @@ export class DoctorsController {
 
       const data = createDoctorSchema.parse(req.body);
 
-      const existingUser = await prisma.user.findUnique({
-        where: { email: data.email },
-      });
+      const existingUser = await User.findOne({ email: data.email.toLowerCase() });
       if (existingUser) {
         return res.status(400).json({ error: 'User with this email already exists' });
       }
 
-      const existingLicense = await prisma.doctor.findFirst({
-        where: { licenseNumber: data.licenseNumber },
-      });
+      const existingLicense = await Doctor.findOne({ licenseNumber: data.licenseNumber });
       if (existingLicense) {
         return res.status(400).json({ error: 'License number already registered' });
       }
@@ -104,34 +76,25 @@ export class DoctorsController {
         await cleanupUploadedFile(req.file.path);
       }
 
-      const result = await prisma.$transaction(async (tx) => {
-        const passwordHash = await bcrypt.hash(data.password, 12);
-        
-        const user = await tx.user.create({
-          data: {
-            email: data.email,
-            passwordHash,
-            firstName: data.firstName,
-            lastName: data.lastName,
-            phone: data.phone || null,
-            role: 'DOCTOR',
-            clinicId,
-          },
-        });
-
-        const doctor = await tx.doctor.create({
-          data: {
-            userId: user.id,
-            clinicId,
-            licenseNumber: data.licenseNumber,
-            specialization: data.specialization,
-            signatureUrl: signatureAsset?.secureUrl || null,
-            signaturePublicId: signatureAsset?.publicId || null,
-          },
-        });
-
-        return { user, doctor };
+      const passwordHash = await bcrypt.hash(data.password, 12);
+      const userDoc = await User.create({
+        email: data.email.toLowerCase(),
+        passwordHash,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        phone: data.phone || null,
+        role: 'DOCTOR',
+        clinicId,
       });
+      const doctorDoc = await Doctor.create({
+        userId: userDoc._id,
+        clinicId,
+        licenseNumber: data.licenseNumber,
+        specialization: data.specialization,
+        signatureUrl: signatureAsset?.secureUrl || null,
+        signaturePublicId: signatureAsset?.publicId || null,
+      });
+      const result = { user: serialize(userDoc), doctor: serialize(doctorDoc) };
 
       await AuditService.log({
         userId: req.user?.userId,
@@ -168,9 +131,7 @@ export class DoctorsController {
 
       const data = updateDoctorSchema.parse(req.body);
 
-      const doctor = await prisma.doctor.findFirst({
-        where: { id, clinicId },
-      });
+      const doctor = serialize(await Doctor.findOne({ _id: id, clinicId }));
 
       if (!doctor) {
         return res.status(404).json({ error: 'Doctor not found' });
@@ -182,29 +143,23 @@ export class DoctorsController {
         await cleanupUploadedFile(req.file.path);
       }
 
-      const updated = await prisma.$transaction(async (tx) => {
-        const updatedDoctor = await tx.doctor.update({
-          where: { id },
-          data: {
-            specialization: data.specialization || doctor.specialization,
-            licenseNumber: data.licenseNumber || doctor.licenseNumber,
-            ...(signatureAsset && {
-              signatureUrl: signatureAsset.secureUrl,
-              signaturePublicId: signatureAsset.publicId,
-            }),
-          },
-        });
+      const updated = serialize(await Doctor.findByIdAndUpdate(
+        id,
+        {
+          specialization: data.specialization || doctor.specialization,
+          licenseNumber: data.licenseNumber || doctor.licenseNumber,
+          ...(signatureAsset && {
+            signatureUrl: signatureAsset.secureUrl,
+            signaturePublicId: signatureAsset.publicId,
+          }),
+        },
+        { new: true }
+      ));
 
-        await tx.user.update({
-          where: { id: doctor.userId },
-          data: {
-            firstName: data.firstName || undefined,
-            lastName: data.lastName || undefined,
-            phone: data.phone || undefined,
-          },
-        });
-
-        return updatedDoctor;
+      await User.findByIdAndUpdate(doctor.userId, {
+        ...(data.firstName && { firstName: data.firstName }),
+        ...(data.lastName && { lastName: data.lastName }),
+        ...(data.phone && { phone: data.phone }),
       });
 
       if (signatureAsset && doctor.signaturePublicId) {
@@ -245,25 +200,16 @@ export class DoctorsController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const doctor = await prisma.doctor.findFirst({
-        where: { id, clinicId },
-      });
+      const doctor = serialize(await Doctor.findOne({ _id: id, clinicId }));
 
       if (!doctor) {
         return res.status(404).json({ error: 'Doctor not found' });
       }
 
-      await prisma.$transaction(async (tx) => {
-        await tx.doctor.update({
-          where: { id },
-          data: { isSuspended: suspend },
-        });
-
-        await tx.user.update({
-          where: { id: doctor.userId },
-          data: { isSuspended: suspend },
-        });
-      });
+      await Promise.all([
+        Doctor.findByIdAndUpdate(id, { isSuspended: suspend }),
+        User.findByIdAndUpdate(doctor.userId, { isSuspended: suspend }),
+      ]);
 
       await AuditService.log({
         userId: req.user?.userId,
@@ -291,18 +237,17 @@ export class DoctorsController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const doctor = await prisma.doctor.findFirst({
-        where: { id, clinicId },
-      });
+      const doctor = serialize(await Doctor.findOne({ _id: id, clinicId }));
 
       if (!doctor) {
         return res.status(404).json({ error: 'Doctor not found' });
       }
 
-      await prisma.$transaction(async (tx) => {
-        await tx.doctor.delete({ where: { id } });
-        await tx.user.delete({ where: { id: doctor.userId } });
-      });
+      const deletedAt = new Date();
+      await Promise.all([
+        Doctor.findByIdAndUpdate(id, { deletedAt }),
+        User.findByIdAndUpdate(doctor.userId, { deletedAt }),
+      ]);
 
       if (doctor.signaturePublicId) {
         await deleteAsset(doctor.signaturePublicId, 'image');

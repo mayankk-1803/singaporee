@@ -1,9 +1,10 @@
 import bcrypt from 'bcrypt';
 import { z } from 'zod';
-import prisma from '../../config/prisma.js';
+import { Clinic, Session, Subscription, User } from '../../models/index.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../../utils/jwt.js';
 import { AuditService } from '../../services/auditService.js';
 import logger from '../../utils/logger.js';
+import { serialize, toObjectId } from '../../utils/mongo.js';
 
 // Zod Schemas
 const loginSchema = z.object({
@@ -28,10 +29,8 @@ export class AuthController {
     try {
       const { email, password } = loginSchema.parse(req.body);
       
-      const user = await prisma.user.findUnique({
-        where: { email },
-        include: { clinic: true },
-      });
+      const userDoc = await User.findOne({ email: email.toLowerCase() }).populate('clinic');
+      const user = serialize(userDoc);
 
       if (!user || user.isSuspended || user.deletedAt) {
         return res.status(401).json({ error: 'Invalid email/password or account suspended' });
@@ -56,12 +55,10 @@ export class AuthController {
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + 7); // 7 days expiration
 
-      await prisma.session.create({
-        data: {
-          userId: user.id,
-          token: refreshToken,
-          expiresAt,
-        },
+      await Session.create({
+        userId: toObjectId(user.id),
+        token: refreshToken,
+        expiresAt,
       });
 
       // Audit Log
@@ -105,60 +102,45 @@ export class AuthController {
       const data = registerSchema.parse(req.body);
 
       // Check if user already exists
-      const existingUser = await prisma.user.findUnique({
-        where: { email: data.adminEmail },
-      });
+      const existingUser = await User.findOne({ email: data.adminEmail.toLowerCase() });
 
       if (existingUser) {
         return res.status(400).json({ error: 'Email already registered' });
       }
 
-      // Execute inside transaction for atomicity
-      const result = await prisma.$transaction(async (tx) => {
-        // 1. Create Clinic
-        const clinic = await tx.clinic.create({
-          data: {
-            name: data.clinicName,
-            email: data.clinicEmail,
-            contactNumber: data.clinicPhone,
-            address: data.clinicAddress,
-          },
-        });
-
-        // 2. Hash Password
-        const passwordHash = await bcrypt.hash(data.adminPassword, 12);
-
-        // 3. Create Admin User
-        const admin = await tx.user.create({
-          data: {
-            email: data.adminEmail,
-            passwordHash,
-            firstName: data.firstName,
-            lastName: data.lastName,
-            phone: data.adminPhone || null,
-            role: 'CLINIC_ADMIN',
-            clinicId: clinic.id,
-          },
-        });
-
-        // 4. Create Active Subscription Plan
-        const startDate = new Date();
-        const endDate = new Date();
-        endDate.setFullYear(endDate.getFullYear() + 1); // 1 year plan
-        
-        await tx.subscription.create({
-          data: {
-            clinicId: clinic.id,
-            planName: 'Enterprise Trial',
-            status: 'ACTIVE',
-            price: 0.00,
-            startDate,
-            endDate,
-          },
-        });
-
-        return { clinic, admin };
+      const clinicDoc = await Clinic.create({
+        name: data.clinicName,
+        email: data.clinicEmail,
+        contactNumber: data.clinicPhone,
+        address: data.clinicAddress,
       });
+      const clinic = serialize(clinicDoc);
+
+      const passwordHash = await bcrypt.hash(data.adminPassword, 12);
+      const adminDoc = await User.create({
+        email: data.adminEmail.toLowerCase(),
+        passwordHash,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        phone: data.adminPhone || null,
+        role: 'CLINIC_ADMIN',
+        clinicId: clinicDoc._id,
+      });
+      const admin = serialize(adminDoc);
+
+      const startDate = new Date();
+      const endDate = new Date();
+      endDate.setFullYear(endDate.getFullYear() + 1);
+      await Subscription.create({
+        clinicId: clinicDoc._id,
+        planName: 'Enterprise Trial',
+        status: 'ACTIVE',
+        price: 0,
+        startDate,
+        endDate,
+      });
+
+      const result = { clinic, admin };
 
       // Audit Log
       await AuditService.log({
@@ -192,10 +174,7 @@ export class AuthController {
       const decoded = verifyRefreshToken(refreshToken);
 
       // Check session in DB
-      const session = await prisma.session.findUnique({
-        where: { token: refreshToken },
-        include: { user: true },
-      });
+      const session = serialize(await Session.findOne({ token: refreshToken }).populate('user'));
 
       if (!session || session.revokedAt || session.expiresAt < new Date()) {
         return res.status(401).json({ error: 'Invalid or expired session' });
@@ -227,10 +206,7 @@ export class AuthController {
     try {
       const { refreshToken } = z.object({ refreshToken: z.string() }).parse(req.body);
 
-      await prisma.session.update({
-        where: { token: refreshToken },
-        data: { revokedAt: new Date() },
-      });
+      await Session.findOneAndUpdate({ token: refreshToken }, { revokedAt: new Date() });
 
       if (req.user) {
         await AuditService.log({

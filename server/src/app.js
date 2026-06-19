@@ -3,7 +3,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import swaggerUi from 'swagger-ui-express';
 import swaggerJsdoc from 'swagger-jsdoc';
-import { prisma } from './config/prisma.js';
+import mongoose from 'mongoose';
+import { connectDB } from './config/database.js';
 import { errorHandler } from './middleware/errorMiddleware.js';
 import { apiLimiter } from './middleware/rateLimitMiddleware.js';
 import logger from './utils/logger.js';
@@ -25,6 +26,7 @@ import { validateCloudinaryConfig } from './config/cloudinary.js';
 const app = express();
 
 validateCloudinaryConfig();
+await connectDB();
 
 // Security Middlewares
 app.use(helmet({
@@ -88,8 +90,10 @@ app.use('/api/', apiLimiter);
 // Health Check Endpoint
 app.get('/api/health', async (req, res) => {
   try {
-    // Ping database
-    await prisma.$queryRaw`SELECT 1`;
+    if (mongoose.connection.readyState !== 1) {
+      throw new Error('MongoDB connection is not ready');
+    }
+
     return res.status(200).json({
       status: 'UP',
       database: 'CONNECTED',

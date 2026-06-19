@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import prisma from '../../config/prisma.js';
+import { AuditLog, Certificate, Patient } from '../../models/index.js';
 import { AuditService } from '../../services/auditService.js';
 import logger from '../../utils/logger.js';
+import { regexContains, serialize } from '../../utils/mongo.js';
 
 const createPatientSchema = z.object({
   fullName: z.string().min(2),
@@ -23,35 +24,26 @@ export class PatientsController {
       }
 
       const { q } = req.query;
-      const searchFilter = q
-        ? {
-            OR: [
-              { fullName: { contains: String(q) } },
-              { identifier: { contains: String(q) } },
-              { email: { contains: String(q) } },
-            ],
-          }
-        : {};
-
-      const queryOptions = {
-        where: {
-          ...searchFilter,
-        },
-        orderBy: { createdAt: 'desc' },
-        include: {
-          _count: {
-            select: { certificate: true },
-          },
-        },
-      };
-
+      const query = {};
+      if (q) {
+        const regex = regexContains(q);
+        query.$or = [
+          { fullName: regex },
+          { identifier: regex },
+          { email: regex },
+        ];
+      }
       if (!isSuperAdmin) {
-        queryOptions.where.clinicId = clinicId;
+        query.clinicId = clinicId;
       }
 
-      const patients = await prisma.patient.findMany(queryOptions);
+      const patients = serialize(await Patient.find(query).sort({ createdAt: -1 }));
+      const mappedPatients = await Promise.all(patients.map(async (patient) => ({
+        ...patient,
+        _count: { certificates: await Certificate.countDocuments({ patientId: patient.id }) },
+      })));
 
-      return res.status(200).json(patients);
+      return res.status(200).json(mappedPatients);
     } catch (error) {
       logger.error('List patients error:', error);
       return res.status(500).json({ error: 'Internal Server Error' });
@@ -67,28 +59,21 @@ export class PatientsController {
 
       const data = createPatientSchema.parse(req.body);
 
-      const existingPatient = await prisma.patient.findFirst({
-        where: {
-          clinicId,
-          identifier: data.identifier,
-        },
-      });
+      const existingPatient = await Patient.findOne({ clinicId, identifier: data.identifier });
 
       if (existingPatient) {
         return res.status(400).json({ error: 'Patient with this identifier already exists in this clinic' });
       }
 
-      const patient = await prisma.patient.create({
-        data: {
-          clinicId,
-          fullName: data.fullName,
-          identifier: data.identifier,
-          dob: new Date(data.dob),
-          gender: data.gender,
-          phone: data.phone,
-          email: data.email,
-        },
-      });
+      const patient = serialize(await Patient.create({
+        clinicId,
+        fullName: data.fullName,
+        identifier: data.identifier,
+        dob: new Date(data.dob),
+        gender: data.gender,
+        phone: data.phone,
+        email: data.email,
+      }));
 
       await AuditService.log({
         userId: req.user?.userId,
@@ -119,30 +104,21 @@ export class PatientsController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const patient = await prisma.patient.findFirst({
-        where: { id, clinicId },
-        include: {
-          certificate: {
-            orderBy: { issueDate: 'desc' },
-            include: {
-              doctor: {
-                include: {
-                  user: {
-                    select: { firstName: true, lastName: true },
-                  },
-                },
-              },
-              certificatefile: true,
-            },
-          },
-        },
-      });
+      const patient = serialize(await Patient.findOne({ _id: id, clinicId }));
 
       if (!patient) {
         return res.status(404).json({ error: 'Patient not found' });
       }
 
-      const timeline = patient.certificate.map((cert) => ({
+      const certificates = serialize(await Certificate.find({ patientId: id })
+        .sort({ issueDate: -1 })
+        .populate({
+          path: 'doctor',
+          populate: { path: 'user', select: 'firstName lastName' },
+        })
+        .populate('certificatefile'));
+
+      const timeline = certificates.map((cert) => ({
         id: cert.id,
         type: 'CERTIFICATE_ISSUED',
         date: cert.issueDate,
@@ -157,14 +133,11 @@ export class PatientsController {
         },
       }));
 
-      const audits = await prisma.auditlog.findMany({
-        where: {
-          clinicId,
-          targetType: 'PATIENT',
-          targetId: id,
-        },
-        orderBy: { timestamp: 'desc' },
-      });
+      const audits = serialize(await AuditLog.find({
+        clinicId,
+        targetType: 'PATIENT',
+        targetId: id,
+      }).sort({ timestamp: -1 }));
 
       const auditTimeline = audits.map((audit) => ({
         id: audit.id,
@@ -201,21 +174,20 @@ export class PatientsController {
 
       const data = createPatientSchema.partial().parse(req.body);
 
-      const patient = await prisma.patient.findFirst({
-        where: { id, clinicId },
-      });
+      const patient = serialize(await Patient.findOne({ _id: id, clinicId }));
 
       if (!patient) {
         return res.status(404).json({ error: 'Patient not found' });
       }
 
-      const updated = await prisma.patient.update({
-        where: { id },
-        data: {
+      const updated = serialize(await Patient.findByIdAndUpdate(
+        id,
+        {
           ...data,
-          dob: data.dob ? new Date(data.dob) : undefined,
+          ...(data.dob && { dob: new Date(data.dob) }),
         },
-      });
+        { new: true }
+      ));
 
       await AuditService.log({
         userId: req.user?.userId,
@@ -246,17 +218,13 @@ export class PatientsController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const patient = await prisma.patient.findFirst({
-        where: { id, clinicId },
-      });
+      const patient = serialize(await Patient.findOne({ _id: id, clinicId }));
 
       if (!patient) {
         return res.status(404).json({ error: 'Patient not found' });
       }
 
-      await prisma.patient.delete({
-        where: { id },
-      });
+      await Patient.findByIdAndUpdate(id, { deletedAt: new Date() });
 
       await AuditService.log({
         userId: req.user?.userId,

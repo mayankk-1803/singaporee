@@ -3,18 +3,11 @@ import logger from '../utils/logger.js';
 export function errorHandler(err, req, res, next) {
   logger.error('Unhandled request error:', err);
 
-  // Prisma duplicate key error
-  if (err.code === 'P2002') {
-    const fields = err.meta?.target || 'field';
+  // MongoDB duplicate key error
+  if (err.code === 11000) {
+    const fields = Object.keys(err.keyPattern || err.keyValue || {}).join(', ') || 'field';
     return res.status(400).json({
       error: `A record with this ${fields} already exists.`,
-    });
-  }
-
-  // Prisma record not found error
-  if (err.code === 'P2025') {
-    return res.status(404).json({
-      error: 'The requested resource was not found.',
     });
   }
 

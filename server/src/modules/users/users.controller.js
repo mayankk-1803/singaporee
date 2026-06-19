@@ -1,8 +1,9 @@
 import bcrypt from 'bcrypt';
 import { z } from 'zod';
-import prisma from '../../config/prisma.js';
+import { User } from '../../models/index.js';
 import { AuditService } from '../../services/auditService.js';
 import logger from '../../utils/logger.js';
+import { serialize } from '../../utils/mongo.js';
 
 const changePasswordSchema = z.object({
   currentPassword: z.string(),
@@ -16,14 +17,10 @@ export class UsersController {
         return res.status(401).json({ error: 'Unauthorized' });
       }
 
-      const user = await prisma.user.findUnique({
-        where: { id: req.user.userId },
-        include: {
-          clinic: true,
-          doctor: true,
-          staff: true,
-        },
-      });
+      const user = serialize(await User.findById(req.user.userId)
+        .populate('clinic')
+        .populate('doctor')
+        .populate('staff'));
 
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
@@ -54,9 +51,7 @@ export class UsersController {
 
       const { currentPassword, newPassword } = changePasswordSchema.parse(req.body);
 
-      const user = await prisma.user.findUnique({
-        where: { id: req.user.userId },
-      });
+      const user = serialize(await User.findById(req.user.userId));
 
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
@@ -68,10 +63,7 @@ export class UsersController {
       }
 
       const newPasswordHash = await bcrypt.hash(newPassword, 12);
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { passwordHash: newPasswordHash },
-      });
+      await User.findByIdAndUpdate(user.id, { passwordHash: newPasswordHash });
 
       await AuditService.log({
         userId: user.id,

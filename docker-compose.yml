@@ -1,18 +1,17 @@
 version: '3.8'
 
 services:
-  mysql_db:
-    image: mysql:8
-    container_name: mysql_db
+  mongo_db:
+    image: mongo:7
+    container_name: mongo_db
     environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: healthcare_saas
+      MONGO_INITDB_DATABASE: healthverify
     ports:
-      - "3306:3306"
+      - "27017:27017"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - mongo_data:/data/db
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -23,7 +22,7 @@ services:
     build: ./server
     container_name: express_server
     environment:
-      DATABASE_URL: "mysql://root:rootpassword@mysql_db:3306/healthcare_saas"
+      MONGODB_URI: "mongodb://mongo_db:27017/healthverify"
       PORT: 4000
       NODE_ENV: production
       JWT_SECRET: "healthcare_jwt_access_secret_key_2026_xyz"
@@ -37,7 +36,7 @@ services:
       - upload_data:/usr/src/app/uploads
       - log_data:/usr/src/app/logs
     depends_on:
-      mysql_db:
+      mongo_db:
         condition: service_healthy
     networks:
       - healthcare_net
@@ -53,7 +52,7 @@ services:
       - healthcare_net
 
 volumes:
-  mysql_data:
+  mongo_data:
   upload_data:
   log_data:
 

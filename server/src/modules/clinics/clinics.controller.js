@@ -1,8 +1,9 @@
 import { z } from 'zod';
-import prisma from '../../config/prisma.js';
+import { Clinic, Doctor, Staff, User } from '../../models/index.js';
 import { AuditService } from '../../services/auditService.js';
 import { cleanupUploadedFile, deleteAsset, uploadClinicLogo } from '../../services/cloudinaryService.js';
 import logger from '../../utils/logger.js';
+import { serialize } from '../../utils/mongo.js';
 
 const updateClinicSchema = z.object({
   name: z.string().min(2).optional(),
@@ -20,15 +21,11 @@ export class ClinicsController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const clinic = await prisma.clinic.findUnique({
-        where: { id: clinicId },
-        include: {
-          subscription: {
-            orderBy: { createdAt: 'desc' },
-            take: 1,
-          },
-        },
-      });
+      const clinic = serialize(await Clinic.findById(clinicId).populate({
+        path: 'subscription',
+        options: { sort: { createdAt: -1 } },
+        perDocumentLimit: 1,
+      }));
 
       if (!clinic) {
         return res.status(404).json({ error: 'Clinic not found' });
@@ -50,10 +47,7 @@ export class ClinicsController {
 
       const updateData = updateClinicSchema.parse(req.body);
       
-      const previousClinic = await prisma.clinic.findUnique({
-        where: { id: clinicId },
-        select: { logoPublicId: true },
-      });
+      const previousClinic = serialize(await Clinic.findById(clinicId).select('logoPublicId'));
 
       let logoAsset = null;
       if (req.file) {
@@ -61,13 +55,14 @@ export class ClinicsController {
         await cleanupUploadedFile(req.file.path);
       }
 
-      const clinic = await prisma.clinic.update({
-        where: { id: clinicId },
-        data: {
+      const clinic = serialize(await Clinic.findByIdAndUpdate(
+        clinicId,
+        {
           ...updateData,
           ...(logoAsset && { logoUrl: logoAsset.secureUrl, logoPublicId: logoAsset.publicId }),
         },
-      });
+        { new: true }
+      ));
 
       if (logoAsset && previousClinic?.logoPublicId) {
         await deleteAsset(previousClinic.logoPublicId, 'image');
@@ -99,18 +94,17 @@ export class ClinicsController {
 
   static async listAllClinics(req, res) {
     try {
-      const clinics = await prisma.clinic.findMany({
-        include: {
-          user: {
-            where: { role: 'CLINIC_ADMIN' },
-            select: { id: true, email: true, firstName: true, lastName: true, isSuspended: true },
-          },
-          subscription: {
-            orderBy: { createdAt: 'desc' },
-            take: 1,
-          },
-        },
-      });
+      const clinics = serialize(await Clinic.find()
+        .populate({
+          path: 'user',
+          match: { role: 'CLINIC_ADMIN', deletedAt: null },
+          select: 'email firstName lastName isSuspended',
+        })
+        .populate({
+          path: 'subscription',
+          options: { sort: { createdAt: -1 } },
+          perDocumentLimit: 1,
+        }));
 
       const mappedClinics = clinics.map((clinic) => ({
         ...clinic,
@@ -130,30 +124,17 @@ export class ClinicsController {
       const { id } = req.params;
       const { suspend } = z.object({ suspend: z.boolean() }).parse(req.body);
 
-      const clinic = await prisma.clinic.findUnique({
-        where: { id },
-      });
+      const clinic = serialize(await Clinic.findById(id));
 
       if (!clinic) {
         return res.status(404).json({ error: 'Clinic not found' });
       }
 
-      await prisma.$transaction(async (tx) => {
-        await tx.user.updateMany({
-          where: { clinicId: id },
-          data: { isSuspended: suspend },
-        });
-        
-        await tx.doctor.updateMany({
-          where: { clinicId: id },
-          data: { isSuspended: suspend },
-        });
-
-        await tx.staff.updateMany({
-          where: { clinicId: id },
-          data: { isSuspended: suspend },
-        });
-      });
+      await Promise.all([
+        User.updateMany({ clinicId: id, deletedAt: null }, { isSuspended: suspend }),
+        Doctor.updateMany({ clinicId: id, deletedAt: null }, { isSuspended: suspend }),
+        Staff.updateMany({ clinicId: id, deletedAt: null }, { isSuspended: suspend }),
+      ]);
 
       await AuditService.log({
         userId: req.user?.userId,

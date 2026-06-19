@@ -1,7 +1,10 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import prisma from '../src/config/prisma.js';
+import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+import { connectDB } from '../src/config/database.js';
+import { Certificate, CertificateFile, Clinic, Doctor } from '../src/models/index.js';
 import {
   uploadCertificatePdf,
   uploadClinicLogo,
@@ -9,6 +12,8 @@ import {
   uploadMedicalReport,
   uploadQrCode,
 } from '../src/services/cloudinaryService.js';
+
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,9 +43,7 @@ const report = {
 };
 
 const migrateClinics = async () => {
-  const clinics = await prisma.clinic.findMany({
-    where: { logoUrl: { startsWith: '/uploads/' } },
-  });
+  const clinics = await Clinic.find({ logoUrl: /^\/uploads\// });
 
   for (const clinic of clinics) {
     const localPath = toLocalPath(clinic.logoUrl);
@@ -50,18 +53,13 @@ const migrateClinics = async () => {
     }
 
     const asset = await uploadClinicLogo(localPath);
-    await prisma.clinic.update({
-      where: { id: clinic.id },
-      data: { logoUrl: asset.secureUrl, logoPublicId: asset.publicId },
-    });
+    await Clinic.findByIdAndUpdate(clinic.id, { logoUrl: asset.secureUrl, logoPublicId: asset.publicId });
     report.clinics.uploaded += 1;
   }
 };
 
 const migrateDoctors = async () => {
-  const doctors = await prisma.doctor.findMany({
-    where: { signatureUrl: { startsWith: '/uploads/' } },
-  });
+  const doctors = await Doctor.find({ signatureUrl: /^\/uploads\// });
 
   for (const doctor of doctors) {
     const localPath = toLocalPath(doctor.signatureUrl);
@@ -71,22 +69,17 @@ const migrateDoctors = async () => {
     }
 
     const asset = await uploadDoctorSignature(localPath);
-    await prisma.doctor.update({
-      where: { id: doctor.id },
-      data: { signatureUrl: asset.secureUrl, signaturePublicId: asset.publicId },
-    });
+    await Doctor.findByIdAndUpdate(doctor.id, { signatureUrl: asset.secureUrl, signaturePublicId: asset.publicId });
     report.doctors.uploaded += 1;
   }
 };
 
 const migrateCertificates = async () => {
-  const certificates = await prisma.certificate.findMany({
-    where: {
-      OR: [
-        { pdfUrl: { startsWith: '/uploads/' } },
-        { qrUrl: { startsWith: '/uploads/' } },
-      ],
-    },
+  const certificates = await Certificate.find({
+    $or: [
+      { pdfUrl: /^\/uploads\// },
+      { qrUrl: /^\/uploads\// },
+    ],
   });
 
   for (const certificate of certificates) {
@@ -113,17 +106,12 @@ const migrateCertificates = async () => {
       continue;
     }
 
-    await prisma.certificate.update({
-      where: { id: certificate.id },
-      data,
-    });
+    await Certificate.findByIdAndUpdate(certificate.id, data);
   }
 };
 
 const migrateCertificateFiles = async () => {
-  const files = await prisma.certificatefile.findMany({
-    where: { fileUrl: { startsWith: '/uploads/' } },
-  });
+  const files = await CertificateFile.find({ fileUrl: /^\/uploads\// });
 
   for (const file of files) {
     const localPath = toLocalPath(file.fileUrl);
@@ -134,15 +122,13 @@ const migrateCertificateFiles = async () => {
 
     const isPdf = path.extname(localPath).toLowerCase() === '.pdf';
     const asset = isPdf ? await uploadCertificatePdf(localPath) : await uploadMedicalReport(localPath);
-    await prisma.certificatefile.update({
-      where: { id: file.id },
-      data: { fileUrl: asset.secureUrl, filePublicId: asset.publicId },
-    });
+    await CertificateFile.findByIdAndUpdate(file.id, { fileUrl: asset.secureUrl, filePublicId: asset.publicId });
     report.certificateFiles.uploaded += 1;
   }
 };
 
 const main = async () => {
+  await connectDB();
   await fs.access(uploadsRoot);
   await migrateClinics();
   await migrateDoctors();
@@ -160,5 +146,5 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await prisma.$disconnect();
+    await mongoose.disconnect();
   });

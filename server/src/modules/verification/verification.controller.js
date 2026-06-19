@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import { prisma } from '../../config/prisma.js';
+import { Certificate, VerificationLog } from '../../models/index.js';
 import { maskName, maskIdentifier } from '../../utils/mask.js';
 import logger from '../../utils/logger.js';
+import { serialize } from '../../utils/mongo.js';
 
 const verifySchema = z.object({
   certificateNumber: z.string(),
@@ -17,20 +18,13 @@ export class VerificationController {
       const { certificateNumber, identifier } = verifySchema.parse(req.body);
 
       // Fetch certificate
-      const certificate = await prisma.certificate.findUnique({
-        where: { certificateNumber },
-        include: {
-          patient: true,
-          doctor: {
-            include: {
-              user: {
-                select: { firstName: true, lastName: true },
-              },
-            },
-          },
-          clinic: true,
-        },
-      });
+      const certificate = serialize(await Certificate.findOne({ certificateNumber })
+        .populate('patient')
+        .populate({
+          path: 'doctor',
+          populate: { path: 'user', select: 'firstName lastName' },
+        })
+        .populate('clinic'));
 
       // Simple user agent parser for logging
       const userAgent = req.headers['user-agent'] || 'Unknown';
@@ -48,15 +42,13 @@ export class VerificationController {
 
       if (!certificate || certificate.deletedAt) {
         // Log verification failure
-        await prisma.verificationlog.create({
-          data: {
-            certificateId: null,
-            ipAddress,
-            device,
-            browser,
-            country,
-            result: 'FAILED_INVALID_CERT',
-          },
+        await VerificationLog.create({
+          certificateId: null,
+          ipAddress,
+          device,
+          browser,
+          country,
+          result: 'FAILED_INVALID_CERT',
         });
         return res.status(404).json({ error: 'Certificate not found' });
       }
@@ -65,15 +57,13 @@ export class VerificationController {
 
       // Validate patient identity
       if (certificate.patient.identifier.toLowerCase().trim() !== identifier.toLowerCase().trim()) {
-        await prisma.verificationlog.create({
-          data: {
-            certificateId,
-            ipAddress,
-            device,
-            browser,
-            country,
-            result: 'FAILED_IDENTITY_MISMATCH',
-          },
+        await VerificationLog.create({
+          certificateId,
+          ipAddress,
+          device,
+          browser,
+          country,
+          result: 'FAILED_IDENTITY_MISMATCH',
         });
         return res.status(404).json({ error: 'Certificate matches, but patient identity does not match' });
       }
@@ -97,15 +87,13 @@ export class VerificationController {
       }
 
       // Record successful lookup log
-      await prisma.verificationlog.create({
-        data: {
-          certificateId,
-          ipAddress,
-          device,
-          browser,
-          country,
-          result: resultStatus,
-        },
+      await VerificationLog.create({
+        certificateId,
+        ipAddress,
+        device,
+        browser,
+        country,
+        result: resultStatus,
       });
 
       // Mask patient data to prevent leaks
@@ -145,10 +133,7 @@ export class VerificationController {
     try {
       const { certNo } = req.params;
 
-      const certificate = await prisma.certificate.findUnique({
-        where: { certificateNumber: certNo },
-        include: { clinic: true },
-      });
+      const certificate = serialize(await Certificate.findOne({ certificateNumber: certNo }).populate('clinic'));
 
       if (!certificate || certificate.deletedAt) {
         return res.status(404).json({ error: 'Certificate not found' });

@@ -1,8 +1,9 @@
 import bcrypt from 'bcrypt';
 import { z } from 'zod';
-import prisma from '../../config/prisma.js';
+import { Staff, User } from '../../models/index.js';
 import { AuditService } from '../../services/auditService.js';
 import logger from '../../utils/logger.js';
+import { serialize } from '../../utils/mongo.js';
 
 const createStaffSchema = z.object({
   email: z.string().email(),
@@ -28,21 +29,10 @@ export class StaffController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const staff = await prisma.staff.findMany({
-        where: { clinicId },
-        include: {
-          user: {
-            select: {
-              id: true,
-              email: true,
-              firstName: true,
-              lastName: true,
-              phone: true,
-              isSuspended: true,
-            },
-          },
-        },
-      });
+      const staff = serialize(await Staff.find({ clinicId }).populate({
+        path: 'user',
+        select: 'email firstName lastName phone isSuspended',
+      }));
 
       return res.status(200).json(staff);
     } catch (error) {
@@ -60,38 +50,27 @@ export class StaffController {
 
       const data = createStaffSchema.parse(req.body);
 
-      const existingUser = await prisma.user.findUnique({
-        where: { email: data.email },
-      });
+      const existingUser = await User.findOne({ email: data.email.toLowerCase() });
       if (existingUser) {
         return res.status(400).json({ error: 'Email already registered' });
       }
 
-      const result = await prisma.$transaction(async (tx) => {
-        const passwordHash = await bcrypt.hash(data.password, 12);
-        
-        const user = await tx.user.create({
-          data: {
-            email: data.email,
-            passwordHash,
-            firstName: data.firstName,
-            lastName: data.lastName,
-            phone: data.phone || null,
-            role: 'STAFF',
-            clinicId,
-          },
-        });
-
-        const staff = await tx.staff.create({
-          data: {
-            userId: user.id,
-            clinicId,
-            position: data.position,
-          },
-        });
-
-        return { user, staff };
+      const passwordHash = await bcrypt.hash(data.password, 12);
+      const userDoc = await User.create({
+        email: data.email.toLowerCase(),
+        passwordHash,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        phone: data.phone || null,
+        role: 'STAFF',
+        clinicId,
       });
+      const staffDoc = await Staff.create({
+        userId: userDoc._id,
+        clinicId,
+        position: data.position,
+      });
+      const result = { user: serialize(userDoc), staff: serialize(staffDoc) };
 
       await AuditService.log({
         userId: req.user?.userId,
@@ -127,30 +106,22 @@ export class StaffController {
 
       const data = updateStaffSchema.parse(req.body);
 
-      const staff = await prisma.staff.findFirst({
-        where: { id, clinicId },
-      });
+      const staff = serialize(await Staff.findOne({ _id: id, clinicId }));
 
       if (!staff) {
         return res.status(404).json({ error: 'Staff not found' });
       }
 
-      const updated = await prisma.$transaction(async (tx) => {
-        const updatedStaff = await tx.staff.update({
-          where: { id },
-          data: { position: data.position || staff.position },
-        });
+      const updated = serialize(await Staff.findByIdAndUpdate(
+        id,
+        { position: data.position || staff.position },
+        { new: true }
+      ));
 
-        await tx.user.update({
-          where: { id: staff.userId },
-          data: {
-            firstName: data.firstName || undefined,
-            lastName: data.lastName || undefined,
-            phone: data.phone || undefined,
-          },
-        });
-
-        return updatedStaff;
+      await User.findByIdAndUpdate(staff.userId, {
+        ...(data.firstName && { firstName: data.firstName }),
+        ...(data.lastName && { lastName: data.lastName }),
+        ...(data.phone && { phone: data.phone }),
       });
 
       await AuditService.log({
@@ -186,25 +157,16 @@ export class StaffController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const staff = await prisma.staff.findFirst({
-        where: { id, clinicId },
-      });
+      const staff = serialize(await Staff.findOne({ _id: id, clinicId }));
 
       if (!staff) {
         return res.status(404).json({ error: 'Staff not found' });
       }
 
-      await prisma.$transaction(async (tx) => {
-        await tx.staff.update({
-          where: { id },
-          data: { isSuspended: suspend },
-        });
-
-        await tx.user.update({
-          where: { id: staff.userId },
-          data: { isSuspended: suspend },
-        });
-      });
+      await Promise.all([
+        Staff.findByIdAndUpdate(id, { isSuspended: suspend }),
+        User.findByIdAndUpdate(staff.userId, { isSuspended: suspend }),
+      ]);
 
       await AuditService.log({
         userId: req.user?.userId,
@@ -232,18 +194,17 @@ export class StaffController {
         return res.status(400).json({ error: 'No clinic context' });
       }
 
-      const staff = await prisma.staff.findFirst({
-        where: { id, clinicId },
-      });
+      const staff = serialize(await Staff.findOne({ _id: id, clinicId }));
 
       if (!staff) {
         return res.status(404).json({ error: 'Staff not found' });
       }
 
-      await prisma.$transaction(async (tx) => {
-        await tx.staff.delete({ where: { id } });
-        await tx.user.delete({ where: { id: staff.userId } });
-      });
+      const deletedAt = new Date();
+      await Promise.all([
+        Staff.findByIdAndUpdate(id, { deletedAt }),
+        User.findByIdAndUpdate(staff.userId, { deletedAt }),
+      ]);
 
       await AuditService.log({
         userId: req.user?.userId,

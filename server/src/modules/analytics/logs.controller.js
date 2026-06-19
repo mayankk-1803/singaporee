@@ -1,5 +1,6 @@
-import { prisma } from '../../config/prisma.js';
+import { AuditLog, Certificate, User, VerificationLog } from '../../models/index.js';
 import logger from '../../utils/logger.js';
+import { regexContains, serialize } from '../../utils/mongo.js';
 
 export class LogsController {
   // Retrieve Verification Logs with advanced filtering
@@ -15,7 +16,8 @@ export class LogsController {
         if (!clinicId) {
           return res.status(400).json({ error: 'No clinic context' });
         }
-        filters.certificate = { clinicId };
+        const clinicCertificates = await Certificate.find({ clinicId }).select('_id');
+        filters.certificateId = { $in: clinicCertificates.map((certificate) => certificate._id) };
       }
 
       if (result) {
@@ -23,32 +25,32 @@ export class LogsController {
       }
 
       if (q) {
-        filters.OR = [
-          { ipAddress: { contains: String(q) } },
-          { browser: { contains: String(q) } },
-          { country: { contains: String(q) } },
-          { certificate: { certificateNumber: { contains: String(q) } } },
+        const regex = regexContains(q);
+        const matchingCertificates = await Certificate.find({
+          certificateNumber: regex,
+          ...(role !== 'SUPER_ADMIN' && { clinicId }),
+        }).select('_id');
+        filters.$or = [
+          { ipAddress: regex },
+          { browser: regex },
+          { country: regex },
+          { certificateId: { $in: matchingCertificates.map((certificate) => certificate._id) } },
         ];
       }
 
       if (startDate || endDate) {
         filters.timestamp = {};
-        if (startDate) filters.timestamp.gte = new Date(String(startDate));
-        if (endDate) filters.timestamp.lte = new Date(String(endDate));
+        if (startDate) filters.timestamp.$gte = new Date(String(startDate));
+        if (endDate) filters.timestamp.$lte = new Date(String(endDate));
       }
 
-      const logs = await prisma.verificationlog.findMany({
-        where: filters,
-        orderBy: { timestamp: 'desc' },
-        include: {
-          certificate: {
-            select: {
-              certificateNumber: true,
-              patient: { select: { fullName: true } },
-            },
-          },
-        },
-      });
+      const logs = serialize(await VerificationLog.find(filters)
+        .sort({ timestamp: -1 })
+        .populate({
+          path: 'certificate',
+          select: 'certificateNumber patientId',
+          populate: { path: 'patient', select: 'fullName' },
+        }));
 
       return res.status(200).json(logs);
     } catch (error) {
@@ -77,29 +79,27 @@ export class LogsController {
       }
 
       if (q) {
-        filters.OR = [
-          { details: { contains: String(q) } },
-          { ipAddress: { contains: String(q) } },
-          { user: { firstName: { contains: String(q) } } },
-          { user: { lastName: { contains: String(q) } } },
+        const regex = regexContains(q);
+        const matchingUsers = await User.find({
+          $or: [{ firstName: regex }, { lastName: regex }],
+          ...(role !== 'SUPER_ADMIN' && { clinicId }),
+        }).select('_id');
+        filters.$or = [
+          { details: regex },
+          { ipAddress: regex },
+          { userId: { $in: matchingUsers.map((user) => user._id) } },
         ];
       }
 
       if (startDate || endDate) {
         filters.timestamp = {};
-        if (startDate) filters.timestamp.gte = new Date(String(startDate));
-        if (endDate) filters.timestamp.lte = new Date(String(endDate));
+        if (startDate) filters.timestamp.$gte = new Date(String(startDate));
+        if (endDate) filters.timestamp.$lte = new Date(String(endDate));
       }
 
-      const logs = await prisma.auditlog.findMany({
-        where: filters,
-        orderBy: { timestamp: 'desc' },
-        include: {
-          user: {
-            select: { firstName: true, lastName: true, email: true, role: true },
-          },
-        },
-      });
+      const logs = serialize(await AuditLog.find(filters)
+        .sort({ timestamp: -1 })
+        .populate({ path: 'user', select: 'firstName lastName email role' }));
 
       return res.status(200).json(logs);
     } catch (error) {

@@ -1,5 +1,6 @@
-import { prisma } from '../../config/prisma.js';
+import { Certificate, Clinic, Doctor, Patient, VerificationLog } from '../../models/index.js';
 import logger from '../../utils/logger.js';
+import { serialize, toObjectId } from '../../utils/mongo.js';
 
 export class AnalyticsController {
   static async getDashboardStats(req, res) {
@@ -18,18 +19,16 @@ export class AnalyticsController {
           expiredCertificates,
           logsToday,
         ] = await Promise.all([
-          prisma.clinic.count(),
-          prisma.doctor.count(),
-          prisma.patient.count(),
-          prisma.certificate.count(),
-          prisma.certificate.count({ where: { status: 'ACTIVE' } }),
-          prisma.certificate.count({ where: { status: 'REVOKED' } }),
-          prisma.certificate.count({ where: { status: 'EXPIRED' } }),
-          prisma.verificationlog.count({
-            where: {
-              timestamp: {
-                gte: new Date(new Date().setHours(0, 0, 0, 0)),
-              },
+          Clinic.countDocuments(),
+          Doctor.countDocuments(),
+          Patient.countDocuments(),
+          Certificate.countDocuments(),
+          Certificate.countDocuments({ status: 'ACTIVE' }),
+          Certificate.countDocuments({ status: 'REVOKED' }),
+          Certificate.countDocuments({ status: 'EXPIRED' }),
+          VerificationLog.countDocuments({
+            timestamp: {
+              $gte: new Date(new Date().setHours(0, 0, 0, 0)),
             },
           }),
         ]);
@@ -67,19 +66,23 @@ export class AnalyticsController {
         activeCertificates,
         revokedCertificates,
         expiredCertificates,
-        verificationAttempts,
-        verificationSuccess,
+        clinicCertificates,
       ] = await Promise.all([
-        prisma.doctor.count({ where: { clinicId } }),
-        prisma.patient.count({ where: { clinicId } }),
-        prisma.certificate.count({ where: { clinicId } }),
-        prisma.certificate.count({ where: { clinicId, issueDate: { gte: todayStart } } }),
-        prisma.certificate.count({ where: { clinicId, issueDate: { gte: monthStart } } }),
-        prisma.certificate.count({ where: { clinicId, status: 'ACTIVE' } }),
-        prisma.certificate.count({ where: { clinicId, status: 'REVOKED' } }),
-        prisma.certificate.count({ where: { clinicId, status: 'EXPIRED' } }),
-        prisma.verificationlog.count({ where: { certificate: { clinicId } } }),
-        prisma.verificationlog.count({ where: { certificate: { clinicId }, result: 'SUCCESS' } }),
+        Doctor.countDocuments({ clinicId }),
+        Patient.countDocuments({ clinicId }),
+        Certificate.countDocuments({ clinicId }),
+        Certificate.countDocuments({ clinicId, issueDate: { $gte: todayStart } }),
+        Certificate.countDocuments({ clinicId, issueDate: { $gte: monthStart } }),
+        Certificate.countDocuments({ clinicId, status: 'ACTIVE' }),
+        Certificate.countDocuments({ clinicId, status: 'REVOKED' }),
+        Certificate.countDocuments({ clinicId, status: 'EXPIRED' }),
+        Certificate.find({ clinicId }).select('_id'),
+      ]);
+
+      const certificateIds = clinicCertificates.map((certificate) => certificate._id);
+      const [verificationAttempts, verificationSuccess] = await Promise.all([
+        VerificationLog.countDocuments({ certificateId: { $in: certificateIds } }),
+        VerificationLog.countDocuments({ certificateId: { $in: certificateIds }, result: 'SUCCESS' }),
       ]);
 
       const verificationSuccessRate = verificationAttempts > 0 
@@ -87,20 +90,16 @@ export class AnalyticsController {
         : 100;
 
       // Find most active doctor
-      const activeDoctors = await prisma.certificate.groupBy({
-        by: ['doctorId'],
-        where: { clinicId },
-        _count: { id: true },
-        orderBy: { _count: { id: 'desc' } },
-        take: 1,
-      });
+      const activeDoctors = await Certificate.aggregate([
+        { $match: { clinicId: toObjectId(clinicId), deletedAt: null } },
+        { $group: { _id: '$doctorId', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 1 },
+      ]);
 
       let mostActiveDoctor = 'N/A';
       if (activeDoctors.length > 0) {
-        const doc = await prisma.doctor.findUnique({
-          where: { id: activeDoctors[0].doctorId },
-          include: { user: true },
-        });
+        const doc = serialize(await Doctor.findById(activeDoctors[0]._id).populate('user'));
         if (doc) {
           mostActiveDoctor = `Dr. ${doc.user.firstName} ${doc.user.lastName}`;
         }
@@ -146,13 +145,11 @@ export class AnalyticsController {
         const startOfMonth = new Date(year, month, 1);
         const endOfMonth = new Date(year, month + 1, 0, 23, 59, 59);
 
-        const count = await prisma.certificate.count({
-          where: {
-            ...(role !== 'SUPER_ADMIN' && { clinicId: clinicId }),
-            issueDate: {
-              gte: startOfMonth,
-              lte: endOfMonth,
-            },
+        const count = await Certificate.countDocuments({
+          ...(role !== 'SUPER_ADMIN' && { clinicId: clinicId }),
+          issueDate: {
+            $gte: startOfMonth,
+            $lte: endOfMonth,
           },
         });
 
@@ -172,20 +169,20 @@ export class AnalyticsController {
         const nextDay = new Date(d);
         nextDay.setDate(nextDay.getDate() + 1);
 
+        const scopedCertificateIds = role === 'SUPER_ADMIN'
+          ? null
+          : (await Certificate.find({ clinicId }).select('_id')).map((certificate) => certificate._id);
+        const logScope = scopedCertificateIds ? { certificateId: { $in: scopedCertificateIds } } : {};
         const [success, failed] = await Promise.all([
-          prisma.verificationlog.count({
-            where: {
-              ...(role !== 'SUPER_ADMIN' && { certificate: { clinicId: clinicId } }),
-              timestamp: { gte: d, lt: nextDay },
-              result: 'SUCCESS',
-            },
+          VerificationLog.countDocuments({
+            ...logScope,
+            timestamp: { $gte: d, $lt: nextDay },
+            result: 'SUCCESS',
           }),
-          prisma.verificationlog.count({
-            where: {
-              ...(role !== 'SUPER_ADMIN' && { certificate: { clinicId: clinicId } }),
-              timestamp: { gte: d, lt: nextDay },
-              result: { not: 'SUCCESS' },
-            },
+          VerificationLog.countDocuments({
+            ...logScope,
+            timestamp: { $gte: d, $lt: nextDay },
+            result: { $ne: 'SUCCESS' },
           }),
         ]);
 
@@ -199,14 +196,11 @@ export class AnalyticsController {
       // 3. Doctor performance (certificates count per doctor)
       let doctorPerformance = [];
       if (role !== 'SUPER_ADMIN' && clinicId) {
-        const doctors = await prisma.doctor.findMany({
-          where: { clinicId: clinicId },
-          include: { user: true, _count: { select: { certificate: true } } },
-        });
-        doctorPerformance = doctors.map((doc) => ({
+        const doctors = serialize(await Doctor.find({ clinicId }).populate('user'));
+        doctorPerformance = await Promise.all(doctors.map(async (doc) => ({
           name: `Dr. ${doc.user.firstName}`,
-          certificates: doc._count?.certificate || 0,
-        }));
+          certificates: await Certificate.countDocuments({ doctorId: doc.id }),
+        })));
       }
 
       // 4. Patient growth trends (cumulative count)
@@ -216,11 +210,9 @@ export class AnalyticsController {
         d.setMonth(d.getMonth() - i);
         const endOfMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
 
-        const count = await prisma.patient.count({
-          where: {
-            ...(role !== 'SUPER_ADMIN' && { clinicId: clinicId }),
-            createdAt: { lte: endOfMonth },
-          },
+        const count = await Patient.countDocuments({
+          ...(role !== 'SUPER_ADMIN' && { clinicId: clinicId }),
+          createdAt: { $lte: endOfMonth },
         });
 
         patientGrowth.push({

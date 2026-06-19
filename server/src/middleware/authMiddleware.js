@@ -1,5 +1,6 @@
 import { verifyAccessToken } from '../utils/jwt.js';
-import prisma from '../config/prisma.js';
+import { User } from '../models/index.js';
+import { serialize } from '../utils/mongo.js';
 import logger from '../utils/logger.js';
 
 export async function authenticate(req, res, next) {
@@ -13,9 +14,7 @@ export async function authenticate(req, res, next) {
     const decoded = verifyAccessToken(token);
 
     // Verify user status in DB
-    const user = await prisma.user.findUnique({
-      where: { id: decoded.userId },
-    });
+    const user = serialize(await User.findById(decoded.userId));
 
     if (!user) {
       return res.status(401).json({ error: 'User account no longer exists' });

@@ -17,12 +17,8 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 COPY package*.json ./
 RUN npm ci
 
-# Copy source files, prisma schema, and configurations
+# Copy source files and configurations
 COPY src ./src
-COPY prisma ./prisma
-
-# Generate Prisma Client
-RUN npx prisma generate
 
 EXPOSE 4000
 

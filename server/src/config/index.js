@@ -8,7 +8,7 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const requiredEnv = ['DATABASE_URL', 'JWT_SECRET', 'JWT_REFRESH_SECRET'];
+const requiredEnv = ['MONGODB_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET'];
 if (process.env.NODE_ENV === 'production') {
   requiredEnv.push('CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET');
 }
@@ -21,7 +21,7 @@ if (missingEnv.length > 0) {
 export const config = {
   port: parseInt(process.env.PORT || '4000', 10),
   env: process.env.NODE_ENV || 'development',
-  databaseUrl: process.env.DATABASE_URL,
+  mongoUri: process.env.MONGODB_URI,
   jwtSecret: process.env.JWT_SECRET,
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET,
   jwtAccessExpiry: process.env.JWT_ACCESS_EXPIRY || '15m',

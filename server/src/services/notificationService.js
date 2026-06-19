@@ -1,10 +1,11 @@
 import nodemailer from 'nodemailer';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
-import prisma from '../config/prisma.js';
+import { Notification } from '../models/index.js';
 import path from 'path';
 import fs from 'fs/promises';
 import { Resend } from 'resend';
+import { toObjectIdOrNull } from '../utils/mongo.js';
 
 export class NotificationService {
   static transporter = nodemailer.createTransport({
@@ -18,15 +19,13 @@ export class NotificationService {
 
   static async sendEmail(params) {
     // Save notification record to DB
-    const dbNotification = await prisma.notification.create({
-      data: {
-        userId: params.userId,
-        email: params.email,
-        subject: params.subject,
-        body: params.body,
-        type: params.type,
-        status: 'PENDING',
-      },
+    const dbNotification = await Notification.create({
+      userId: toObjectIdOrNull(params.userId),
+      email: params.email,
+      subject: params.subject,
+      body: params.body,
+      type: params.type,
+      status: 'PENDING',
     });
 
     try {
@@ -79,10 +78,7 @@ export class NotificationService {
           throw new Error(`Resend email failed: ${JSON.stringify(sendResult.error)}`);
         }
 
-        await prisma.notification.update({
-          where: { id: dbNotification.id },
-          data: { status: 'SENT', sentAt: new Date() },
-        });
+        await Notification.findByIdAndUpdate(dbNotification.id, { status: 'SENT', sentAt: new Date() });
         logger.info(`Email successfully sent via Resend to ${params.email} [${params.type}]`);
         return { success: true, provider: 'resend', id: sendResult?.data?.id || null };
       } else if (config.smtp.auth.user && config.smtp.auth.pass) {
@@ -95,10 +91,7 @@ export class NotificationService {
           attachments: attachments,
         });
         
-        await prisma.notification.update({
-          where: { id: dbNotification.id },
-          data: { status: 'SENT', sentAt: new Date() },
-        });
+        await Notification.findByIdAndUpdate(dbNotification.id, { status: 'SENT', sentAt: new Date() });
         logger.info(`Email successfully sent via SMTP to ${params.email} [${params.type}]`);
         return { success: true, provider: 'smtp', id: null };
       } else {
@@ -107,10 +100,7 @@ export class NotificationService {
           attachmentInfo = `\nAttachment: ${attachments[0].filename} (Path: ${attachments[0].path})`;
         }
         logger.warn(`Resend or SMTP credentials not configured. Simulation email logged:\nTo: ${params.email}\nSubject: ${params.subject}${attachmentInfo}\nBody: ${params.body.substring(0, 300)}...`);
-        await prisma.notification.update({
-          where: { id: dbNotification.id },
-          data: { status: 'SENT', sentAt: new Date() },
-        });
+        await Notification.findByIdAndUpdate(dbNotification.id, { status: 'SENT', sentAt: new Date() });
         return { success: true, provider: 'simulation', id: null };
       }
     } catch (error) {
@@ -120,10 +110,7 @@ export class NotificationService {
       logger.error(`Data: ${error?.response?.data ? JSON.stringify(error.response.data) : 'N/A'}`);
       logger.error(error?.stack || error);
       logger.error(`Failed to send email to ${params.email}:`, error);
-      await prisma.notification.update({
-        where: { id: dbNotification.id },
-        data: { status: 'FAILED' },
-      });
+      await Notification.findByIdAndUpdate(dbNotification.id, { status: 'FAILED' });
       return { success: false, provider: null, error };
     }
   }
